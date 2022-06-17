@@ -1,0 +1,249 @@
+---
+title: "Tesla Tweets Analysis"
+author: "Cathy Liu"
+date: '2022-06-17'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rtweet)
+library(plyr)
+library(tidytext)
+library(dplyr)
+library(stringr)
+library(tm)
+library(topicmodels)
+library(lubridate)
+library(textdata)
+library(RColorBrewer)
+library(wordcloud)
+library(wordcloud2)
+library(ggplot2)
+
+```
+
+### Collect tweets for tesla
+
+```{r}
+tesla_tweets<-search_tweets(
+  q="tesla",
+  n=1000,
+  include_rts = FALSE,
+  lang="en",
+  retryonratelimit = TRUE
+)
+names(tesla_tweets)
+```
+
+```{r}
+tesla_short<-tesla_tweets%>%
+  select(user_id,status_id, created_at, screen_name, text,source, favorite_count, retweet_count,media_type, location,urls_expanded_url)
+
+tesla_short %>% write_csv("tesla_short_07_06_22.csv")
+tesla_tweets1<-read_csv("tesla_short_07_06_22.csv")
+```
+#### conbine the dataset which was collected from 29th  of May till 7th  of June, 5 days data collection and delect duplicate content.Got totally 17458 objects, and selected 11 variables from 90s
+```{r}
+
+tesla_tweets2 <- read.csv("tesla_short_06_06_22.csv")
+tesla_tweets3 <- read.csv("tesla_short_29_5_22.csv")
+tesla_tweets4 <- read.csv("tesla_short_01_06_22.csv")
+tesla_tweets5 <- read.csv("tesla_short_02_06_22.csv")
+tesla_tweets6 <- read.csv("tesla_short_04_06_22.csv")
+
+tesla_join <- tesla_tweets2 %>%    
+  left_join(tesla_tweets3) %>% 
+  left_join(tesla_tweets4) %>% 
+  left_join(tesla_tweets5) %>% 
+  left_join(tesla_tweets6) 
+ 
+  
+```
+### Finding top 10 tweeting location
+```{r}
+tesla_location <- tesla_join %>% 
+  filter(!is.na(location)) %>% 
+  dplyr::count(location, sort = TRUE) %>% 
+  #mutate(percent=paste0(round(n/sum(n)*100,2),"%")) %>% 
+  top_n(10)
+
+tesla_location %>% ggplot(
+  aes(n, fct_reorder(location, n), fill = location)) +
+  geom_col(alpha = 0.8) 
+
+```
+### Finding top 6 twitter users faverite mobile brand
+```{r}
+ts_mobile <- tesla_join %>% dplyr::count(source,sort = TRUE) %>% 
+  mutate(percent=paste0(round(n/sum(n)*100,2),"%")) %>% 
+  top_n(6)
+
+ggplot(ts_mobile, aes(x = "", y = percent, fill = source)) +
+  geom_col() +
+  geom_text(aes(label = percent),
+            position = position_stack(vjust = 0.5)) +
+  coord_polar(theta = "y")
+
+```
+
+### Finding Top 10 retweeted tweets
+```{r}
+tesla_join %>% 
+  arrange(-retweet_count) %>%
+  head(10) %>% 
+  select(created_at, screen_name, text, retweet_count)
+
+```
+#### Finding top 10 favourite tweets and finding the relationship between top 10 retweeted tweets and top 10 most favorite tweets
+
+
+```{r}
+tesla_join %>% 
+  arrange(-favorite_count) %>%
+  top_n(10, favorite_count) %>% 
+  select(created_at, screen_name, text, favorite_count)
+
+tesla_retweet <- tesla_join %>% 
+  filter(retweet_count > 0) 
+ggplot(tesla_retweet, aes(x=retweet_count, y=favorite_count))+
+  geom_point()
+
+```
+
+
+
+
+### Tidy dataset text 
+
+```{r}
+remove_reg <- "&amp;|&lt;|&gt;|\\d+\\w*\\d*|#\\w+|[^\x01-\x7F]|[[:punct:]]|https\\S*"
+# &amp = @
+# &lt;= <
+# &gt; >
+
+#removing retweets characters
+tesla_tidy <- tesla_join %>% 
+  filter(!str_detect(text, "^RT")) %>%
+  mutate(text = str_remove_all(text, remove_reg)) 
+
+#unnesting tweets 
+tesla_tidy_token <- tesla_tidy  %>% 
+  unnest_tokens(word, text) %>% 
+  anti_join(get_stopwords())
+
+#keep only character-words
+tesla_tidy_token<-tesla_tidy_token %>%
+  filter(
+    str_detect(word, "[a-z]"))
+head(tesla_tidy_token$word)
+```
+### Using Wordcloud to find most frequent words. And then remove meaningless words to get meaningful wordcloud.
+```{r}
+tesla_tidy_token %>% dplyr::count(word) %>%
+  with(wordcloud(word, n, max.words = 400))
+
+tesla_tidy_cloud <-tesla_tidy_token %>%
+  dplyr:: count(word) %>% 
+  select(word, n)%>%
+  filter(!word=="tesla" &
+         !word=="car" &
+         !word== "elonmusk")
+
+wordcloud2(tesla_tidy_cloud,color = "random-light", backgroundColor = "black")
+```
+### Convert tidy words to DocumentTermMatrix and Use `LDA()` function to create an LDA model. 
+```{r}
+ tesla_tidy_word<- tesla_tidy_token %>% 
+  select(word) %>% 
+  filter(!word=="tesla" &
+         !word=="car" &
+         !word== "elonmusk"
+  )
+  
+tesla_corpus <- Corpus(VectorSource(tesla_tidy_word))
+
+tesla_dtm <- DocumentTermMatrix(tesla_corpus)
+tesla_dtm
+
+tesla_lda <- LDA(tesla_dtm, k=4,control = list(seed = 1234))
+tesla_lda
+tesla_topics <- tidy(tesla_lda, matrix = "beta")
+tesla_topics
+```
+### Use beta as topic and terms, visualise the top 10 words from each topic .
+```{r}
+tesla_topics <- tidy(tesla_lda, matrix = "beta")
+
+tesla_topics %>% 
+  group_by(topic) %>% 
+  slice_max(beta, n=10) %>% 
+  ungroup()  %>% 
+  mutate(topic = paste("Topic", topic)) %>% 
+  ggplot(aes(beta, reorder_within(term, beta, topic), fill= topic)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_reordered() +
+  labs(x = expression(beta), y=NULL)
+```
+#### The first topic is a mix topic of company and customer. The second bar chart shows a topic mixed with products and customers’ opinion. The third image shows a mixed topic of company and products. The last figure shows the topic mixed with sales and company.
+
+### Sentiment of the text
+```{r}
+bing<- get_sentiments("bing")
+nrc <- get_sentiments("nrc")
+afinn <- get_sentiments("afinn")
+
+selected_tesla_tidy<-tesla_tidy_token %>% select(created_at, screen_name, location, word, user_id)
+selected_tesla_tidy<-selected_tesla_tidy%>%
+  inner_join(bing) %>% 
+  dplyr::rename(sentiment_bing=sentiment) %>% 
+  inner_join(nrc)%>%
+  dplyr::rename(sentiment_nrc=sentiment)
+
+tesla_bing <- selected_tesla_tidy%>%
+  dplyr::count(sentiment_bing, sort=TRUE)%>% 
+  mutate(percent=paste0(round(n/sum(n)*100,2),"%"))
+```
+### Visualization sentiment_bing
+```{r}
+counts<-selected_tesla_tidy %>% dplyr::count(sentiment_bing, sort = TRUE) 
+ggplot(tesla_bing, aes(x = "", y = percent, fill = sentiment_bing)) +
+  geom_col() +
+  geom_text(aes(label = percent),
+            position = position_stack(vjust = 0.5)) +
+  coord_polar(theta = "y")+
+  ggtitle("Sentiment bing for Tesla tweets")
+
+
+```
+#### "Bing" result shows 56.66% of words are negative while only 43.34% of words are positive. 
+
+### Visualization sentiments_nrc
+```{r}
+selected_tesla_tidy%>%
+  group_by(user_id)%>%
+  dplyr::count(sentiment_nrc, sort=TRUE)
+count_nrc <- selected_tesla_tidy %>% dplyr::count(sentiment_nrc, sort = TRUE) 
+
+count_nrc %>% ggplot(
+  aes(n,fct_reorder(sentiment_nrc, n), fill = sentiment_nrc)) +
+  geom_col(alpha = 0.8) +
+  ggtitle("Sentiment nrc for Tesla tweets")
+
+```
+#### The bar chart visualization shows that “negative” is more than “positive”, “sadness” is more than “joy”, “fear” and “anger” are more than “trust” and “anticipation”, “disgust” is more than “surprise”. The result is still not good but seems a little bit better than “bing” results, the difference looks less.
+
+### Visualization sentiments_affinn
+```{r}
+count_afinn <- afinn %>% dplyr::count(value, sort = TRUE) 
+
+count_afinn %>% ggplot(aes(value, n, fill = value, color=value, col=rainbow(10))) +
+  geom_col(show.legend = FALSE, alpha=0.8) +
+  ggtitle("Sentiment afinn for Tesla tweets")+
+  labs(x="Afinn value",y="Words number")
+
+```
+#### "Afinn" sentiment result appears that the afinn lexicon finds more negative sentiments than the bing and nrc lexicon
